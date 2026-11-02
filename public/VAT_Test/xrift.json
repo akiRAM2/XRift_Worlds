@@ -1,0 +1,12 @@
+{
+  "world": {
+    "distDir": "./dist",
+    "buildCommand": "npm run build",
+    "title": "VAT TEST",
+    "description": "ぷにゅんと変形するパステルマーブルと、風が波のように渡る芝生。VAT（頂点アニメーションテクスチャ）で動く、3つのシーンを体験できるワールドです。直径約5mの球が浮かぶ「FLOAT」、2本の棒の間をやわらかくすり抜ける「SQUEEZE」、青空の下で草と白い風の軌跡が揺れる「MEADOW」。台座のボタンで切り替えて、近づいたり歩き回ったりしながら眺めてみてください。",
+    "thumbnailPath": "thumbnail.png",
+    "physics": { "gravity": 9.81, "allowInfiniteJump": false },
+    "camera": { "near": 0.05, "far": 150 },
+    "ignore": ["**/*.js.map", "**/index.html", "**/__federation_shared_*.js", "**/rapier.es-*.js", "**/hls-*.js"]
+  }
+}

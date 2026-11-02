@@ -1,0 +1,11 @@
+{
+  "frames": 64,
+  "period": 3.2,
+  "width": 63,
+  "height": 64,
+  "blades": 7,
+  "segments": 4,
+  "bladeVerts": 9,
+  "vertices": 63,
+  "format": "RGBA16F"
+}

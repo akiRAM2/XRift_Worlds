@@ -1,0 +1,14 @@
+{
+  "frames": 120,
+  "duration": 12,
+  "width": 1024,
+  "height": 840,
+  "rows": 7,
+  "vertices": 6305,
+  "maxRadius": 3.20080937220784,
+  "format": "RGBA16F",
+  "segments": [
+    96,
+    64
+  ]
+}
