@@ -11,13 +11,6 @@ import {
   InstancedBufferGeometry,
   Mesh,
   MeshBasicMaterial,
-  HalfFloatType,
-  LinearFilter,
-  OrthographicCamera,
-  RGBAFormat,
-  Scene,
-  Vector4,
-  WebGLRenderTarget,
   MeshStandardMaterial,
   AdditiveBlending,
   PlaneGeometry,
@@ -45,8 +38,6 @@ const GARDEN_RADIUS = 26
 const THEME_SECONDS = 120
 // シェーダーへ渡す時刻はこの周期で折り返す（float精度対策。VAT_TestのMEADOWと同じ方針）
 const TIME_WRAP = 600
-// 波シムの解像度と、シム空間（55m四方＝庭の直径）に対するテクセル
-const WAVE_SIZE = 256
 const THEME_FADE = 24
 
 interface Palette {
@@ -121,42 +112,6 @@ const GLSL_NOISE = /* glsl */ `
 `
 
 
-const WAVE_VERT = /* glsl */ `
-  varying vec2 vUv;
-  void main(){
-    vUv = uv;
-    gl_Position = vec4(position.xy, 0.0, 1.0);
-  }
-`
-
-// 簡単な流体シミュレーション: 波動方程式をピンポンで解く。
-// r = 現在の波高, g = 1ステップ前の波高。波同士が干渉し、縁では静まる。
-const WAVE_FRAG = /* glsl */ `
-  uniform sampler2D uPrev;
-  uniform float uTexel;
-  uniform vec4 uImpulses[14];
-  varying vec2 vUv;
-  void main(){
-    float h = texture2D(uPrev, vUv).r;
-    float hp = texture2D(uPrev, vUv).g;
-    float avg = (
-      texture2D(uPrev, vUv + vec2(uTexel, 0.0)).r +
-      texture2D(uPrev, vUv - vec2(uTexel, 0.0)).r +
-      texture2D(uPrev, vUv + vec2(0.0, uTexel)).r +
-      texture2D(uPrev, vUv - vec2(0.0, uTexel)).r) * 0.25;
-    float nh = (avg * 2.0 - hp) * 0.995;
-    for(int i = 0; i < 14; i++){
-      vec4 imp = uImpulses[i];
-      if(imp.w == 0.0) continue;
-      float d = distance(vUv, imp.xy);
-      nh += imp.w * exp(-(d * d) / (imp.z * imp.z));
-    }
-    float outside = smoothstep(0.485, 0.5, distance(vUv, vec2(0.5)));
-    nh = mix(nh, 0.0, outside);
-    gl_FragColor = vec4(nh, h, 0.0, 1.0);
-  }
-`
-
 const FLOOR_VERT = /* glsl */ `
   varying vec3 vWorld;
   void main(){
@@ -173,8 +128,7 @@ const FLOOR_FRAG = /* glsl */ `
   uniform vec3 uGlowA;
   uniform vec3 uGlowB;
   uniform vec3 uPetalA;
-  uniform sampler2D uWaveTex;
-  uniform float uWaveTexel;
+  uniform vec3 uAvatars[8]; // xy: アバターのXZ, z: 強さ
   varying vec3 vWorld;
   ${GLSL_NOISE}
   void main(){
@@ -182,17 +136,10 @@ const FLOOR_FRAG = /* glsl */ `
     float r = length(p);
     float mask = smoothstep(27.1, 26.0, r);
 
-    // 流体シムの波高と勾配
-    vec2 wuv = p / 55.0 + 0.5;
-    float h = texture2D(uWaveTex, wuv).r;
-    float hx = texture2D(uWaveTex, wuv + vec2(uWaveTexel, 0.0)).r;
-    float hz = texture2D(uWaveTex, wuv + vec2(0.0, uWaveTexel)).r;
-
     // 万華鏡対称に折った流れ模様。波高が模様を歪ませ、干渉縞を作る。
     vec2 kp = kaleido(p, uSegments);
     vec2 flow = 1.2 * vec2(cos(uTime * 0.0524), sin(uTime * 0.0419));
     float v = fbm(kp * 0.32 + flow + fbm3(kp * 0.12 - flow) * 0.9);
-    v += h * 0.85;
     float contour = 1.0 - smoothstep(0.0, 0.07, abs(fract(v * 2.6 + uTime * 0.015) - 0.5));
     contour = pow(contour, 3.0);
 
@@ -212,10 +159,22 @@ const FLOOR_FRAG = /* glsl */ `
     col += uGlowB * (gridR + gridA) * 0.10 * mask;
     col += uGlowA * contour * (0.6 + 0.9 * smoothstep(0.2, 0.9, v)) * mask;
     col *= 1.0 + 0.05 * sin(r * 40.0 - uTime * 2.1991);
-    // 波の山は明るく、谷は淡く、斜面の縁が光る
-    col += uGlowB * max(h, 0.0) * 1.4 * mask;
-    col += uGlowA * max(-h, 0.0) * 0.45 * mask;
-    col += uGlowA * length(vec2(hx - h, hz - h)) * 2.2 * mask;
+    // アバターの立ち位置から2.5秒ごとに広がる波紋。
+    // 広がるにつれ万華鏡折りのノイズで輪郭が崩れ、複雑な波形になる。
+    for(int i = 0; i < 8; i++){
+      vec3 av = uAvatars[i];
+      if(av.z < 0.02) continue;
+      float age = mod(uTime + float(i) * 0.37, 2.5);
+      vec2 rel = p - av.xy;
+      float d = length(rel);
+      vec2 wkp = kaleido(rel, uSegments);
+      float warp = fbm3(wkp * 0.35) - 0.5;
+      float rr = d + warp * 1.7 * smoothstep(0.0, 0.8, age);
+      float ring = exp(-pow((rr - age * 3.2) * 2.6, 2.0));
+      float seg = 0.75 + 0.25 * sin(atan(rel.y, rel.x) * uSegments * 2.0);
+      float fade = pow(1.0 - age / 2.5, 2.0);
+      col += (uGlowA * 0.8 + uGlowB * 0.45) * ring * seg * fade * av.z * mask;
+    }
     col += uPetalA * bloom * 0.35 * mask;
     col *= 0.75 + 0.25 * smoothstep(27.0, 6.0, r);
     col *= 1.5;
@@ -267,35 +226,58 @@ const PETAL_VERT = /* glsl */ `
     float c = cos(a), s = sin(a);
     return mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c);
   }
-  mat3 rotZ(float a){
-    float c = cos(a), s = sin(a);
-    return mat3(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0);
+  // 渦の軌道＋流れ場ドリフトによる中心位置（速度を差分で取るため関数化）
+  vec3 shardCenter(float t, out float ang){
+    float phase = aSeed.w * 6.2831853;
+    ang = phase + t * (6.2831853 * aSeed.y / 600.0)
+      + sin(t * 0.1152 + phase * 3.0) * 0.55;
+    float radius = aSeed.x + sin(t * 0.0733 + phase * 5.0) * 1.6;
+    vec2 orbit = vec2(cos(ang), sin(ang)) * radius;
+    vec2 fq = orbit * 0.055 + aSeed.w * 37.0;
+    vec2 drift = vec2(
+      vnoise(fq + vec2(t * 0.0524, 0.0)) - 0.5,
+      vnoise(fq + vec2(0.0, -t * 0.0419) + 31.7) - 0.5) * 5.2;
+    vec2 xz = orbit + drift;
+    float y = aSeed.z
+      + sin(t * 0.2513 + aSeed.w * 43.0) * 0.7
+      + (vnoise(xz * 0.08 + t * 0.0314) - 0.5) * 2.4;
+    return vec3(xz.x, y, xz.y);
   }
   void main(){
     vUv = uv;
-    float phase = aSeed.w * 6.2831853;
-    // 全体の渦に、角度と半径のゆらぎを重ねて密度の波を作る
-    float ang = phase + uTime * (6.2831853 * aSeed.y / 600.0)
-      + sin(uTime * 0.1152 + phase * 3.0) * 0.55;
-    float radius = aSeed.x + sin(uTime * 0.0733 + phase * 5.0) * 1.6;
-    vec2 orbit = vec2(cos(ang), sin(ang)) * radius;
-    // 大きな流れ場で漂う（渦に乗りながら寄せては離れる）
-    vec2 fq = orbit * 0.055 + aSeed.w * 37.0;
-    vec2 drift = vec2(
-      vnoise(fq + vec2(uTime * 0.0524, 0.0)) - 0.5,
-      vnoise(fq + vec2(0.0, -uTime * 0.0419) + 31.7) - 0.5) * 5.2;
-    vec2 xz = orbit + drift;
-    float y = aSeed.z
-      + sin(uTime * 0.2513 + aSeed.w * 43.0) * 0.7
-      + (vnoise(xz * 0.08 + uTime * 0.0314) - 0.5) * 2.4;
-    vec3 center = vec3(xz.x, y, xz.y);
-    float fl = uTime * 0.9006 + aSeed.w * 81.0 + vnoise(xz * 0.2 - uTime * 0.0524) * 3.0;
+    float ang;
+    vec3 center = shardCenter(uTime, ang);
+    float ang2;
+    vec3 ahead = shardCenter(uTime + 0.35, ang2);
+    vec3 vel = ahead - center;
+    float vl = length(vel);
+    // 進行方向を向くフレームを作る
+    vec3 fwd = vl > 0.001 ? vel / vl : vec3(-sin(ang), 0.0, cos(ang));
+    vec3 up0 = abs(fwd.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 right = normalize(cross(up0, fwd));
+    vec3 up = cross(fwd, right);
+
+    // そのフレームの中で、破片ごとに違うローカル軸・速さ・向きで回る。
+    // 速さはTIME_WRAPで整数周回になるよう量子化（ループの継ぎ目対策）。
+    // 正弦波で全員が揃って羽ばたく「わざとらしさ」を消すのが狙い。
+    float h1 = fract(aSeed.w * 13.73);
+    float h2 = fract(aSeed.w * 29.31);
+    float h3 = fract(aSeed.w * 47.17);
+    float spin1 = (40.0 + floor(h1 * 110.0)) * (h3 > 0.5 ? 1.0 : -1.0);
+    float spin2 = (40.0 + floor(h2 * 110.0)) * (h3 > 0.75 || h3 < 0.25 ? 1.0 : -1.0);
+    float a1 = aSeed.w * 43.0 + uTime * (6.2831853 * spin1 / 600.0);
+    float a2 = aSeed.w * 91.0 + uTime * (6.2831853 * spin2 / 600.0);
+    mat3 local = rotY(a1) * rotX(a2);
+    local = local * rotX(aSeed.w * 40.0) * rotY(aSeed.w * 71.0);
+
     vec3 p = position * (0.75 + fract(aSeed.w * 7.31) * 0.9);
-    p = rotX(sin(fl) * 0.9) * p;
-    p = rotZ(cos(fl * 0.83) * 0.7) * p;
-    p = rotY(-ang + sin(fl * 0.5) * 0.6) * p;
-    vShade = 0.9 + 0.5 * sin(fl * 1.7);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(center + p, 1.0);
+    vec3 lp = local * p;
+    vec3 world = center + right * lp.x + up * lp.y + fwd * lp.z;
+    vec3 ln = local * vec3(0.0, 0.0, 1.0);
+    vec3 wn = right * ln.x + up * ln.y + fwd * ln.z;
+    // 陰影は法線と光の向きから（回転に連動して自然にきらめく）
+    vShade = 0.7 + 0.55 * abs(dot(wn, normalize(vec3(0.4, 0.8, 0.3))));
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   }
 `
 
@@ -344,44 +326,10 @@ export function World() {
       uGlowB: { value: new Color(PALETTES[0].glowB) },
       uPetalA: { value: new Color(PALETTES[0].petalA) },
       uPetalB: { value: new Color(PALETTES[0].petalB) },
+      uAvatars: { value: Array.from({ length: 8 }, () => new Vector3(0, 0, 0)) },
     }),
     [],
   )
-
-  // 波動方程式シム（ピンポン2枚のRenderTargetを60Hzで回す）
-  const sim = useMemo(() => {
-    const makeTarget = () =>
-      new WebGLRenderTarget(WAVE_SIZE, WAVE_SIZE, {
-        minFilter: LinearFilter,
-        magFilter: LinearFilter,
-        format: RGBAFormat,
-        type: HalfFloatType,
-        depthBuffer: false,
-        stencilBuffer: false,
-      })
-    const mat = new ShaderMaterial({
-      vertexShader: WAVE_VERT,
-      fragmentShader: WAVE_FRAG,
-      uniforms: {
-        uPrev: { value: null },
-        uTexel: { value: 1 / WAVE_SIZE },
-        uImpulses: { value: Array.from({ length: 14 }, () => new Vector4(0, 0, 0.01, 0)) },
-      },
-      depthTest: false,
-      depthWrite: false,
-    })
-    const scene = new Scene()
-    const quad = new Mesh(new PlaneGeometry(2, 2), mat)
-    quad.frustumCulled = false
-    scene.add(quad)
-    return {
-      read: makeTarget(),
-      write: makeTarget(),
-      mat,
-      scene,
-      cam: new OrthographicCamera(-1, 1, 1, -1, 0, 1),
-    }
-  }, [])
 
   const floorMat = useMemo(
     () =>
@@ -395,8 +343,7 @@ export function World() {
           uGlowA: shared.uGlowA,
           uGlowB: shared.uGlowB,
           uPetalA: shared.uPetalA,
-          uWaveTex: { value: null },
-          uWaveTexel: { value: 1 / WAVE_SIZE },
+          uAvatars: shared.uAvatars,
         },
       }),
     [shared],
@@ -481,11 +428,6 @@ export function World() {
     a: new Color(),
     b: new Color(),
     avatars: Array.from({ length: 8 }, () => ({ x: 0, z: 0, s: 0 })),
-    acc: 0,
-    simTime: 0,
-    lastPulse: -1,
-    lastDrip: ROCKS.map(() => -1),
-    stepPos: Array.from({ length: 8 }, () => ({ x: 0, z: 0, ok: false })),
   })
 
   useFrame((state) => {
@@ -536,58 +478,9 @@ export function World() {
       }
     }
 
-    // 流体シムを60Hz固定ステップで進める（波同士が干渉する）
-    sc.acc += Math.min(state.clock.getDelta(), 0.1)
-    let steps = 0
-    while (sc.acc >= 1 / 60 && steps < 3) {
-      sc.acc -= 1 / 60
-      sc.simTime += 1 / 60
-      steps++
-      const impulses = sim.mat.uniforms.uImpulses.value as Vector4[]
-      for (const imp of impulses) imp.w = 0
-      let n = 0
-      const push = (x: number, z: number, radius: number, strength: number) => {
-        if (n >= impulses.length) return
-        impulses[n].set(x / 55 + 0.5, z / 55 + 0.5, radius, strength)
-        n++
-      }
-      // 2.5秒ごとのパルス（全アバター同時。サーバ時計基準なので全員に同期）
-      const pulseSlot = Math.floor(t / 2.5)
-      if (pulseSlot !== sc.lastPulse) {
-        sc.lastPulse = pulseSlot
-        for (const av of avatars) {
-          if (av.s > 0.3) push(av.x, av.z, 0.02, 0.5)
-        }
-      }
-      // 石からの滴り（4秒ごと、石ごとに位相をずらす）
-      ROCKS.forEach((rock, i) => {
-        const slot = Math.floor((t + i * 1.37) / 4)
-        if (slot !== sc.lastDrip[i]) {
-          sc.lastDrip[i] = slot
-          push(rock.pos[0], rock.pos[1], 0.014, 0.3)
-        }
-      })
-      // 足跡: 0.9m動くごとに小さな波紋
-      avatars.forEach((av, i) => {
-        if (av.s <= 0.3) return
-        const last = sc.stepPos[i]
-        if (!last.ok || Math.hypot(av.x - last.x, av.z - last.z) > 0.9) {
-          push(av.x, av.z, 0.01, 0.22)
-          last.x = av.x
-          last.z = av.z
-          last.ok = true
-        }
-      })
-      sim.mat.uniforms.uPrev.value = sim.read.texture
-      const gl = state.gl
-      gl.setRenderTarget(sim.write)
-      gl.render(sim.scene, sim.cam)
-      gl.setRenderTarget(null)
-      const tmp = sim.read
-      sim.read = sim.write
-      sim.write = tmp
-    }
-    floorMat.uniforms.uWaveTex.value = sim.read.texture
+    // 波紋の発生源として共有uniformへ書き込む
+    const slots = shared.uAvatars.value
+    avatars.forEach((av, i) => slots[i].set(av.x, av.z, av.s))
 
     // 縁のネオンリングと石の縁発光をテーマ色に同期
     const pulse = 0.5 + 0.5 * Math.sin(t * 0.4503)
