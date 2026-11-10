@@ -15,10 +15,10 @@
       "**/hls-*.js"
     ],
     "physics": {
-      "allowInfiniteJump": false,
+      "allowInfiniteJump": true,
       "gravity": 9.81
     },
     "thumbnailPath": "thumbnail.png",
-    "title": "KALEID DOME"
+    "title": "KALEIDOME"
   }
 }

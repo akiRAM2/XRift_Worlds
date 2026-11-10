@@ -21,7 +21,7 @@ function App() {
         <DevEnvironment
           moveSpeed={3}
           spawnPosition={[0, 1.6, 15]}
-          physicsConfig={{ gravity: 9.81, allowInfiniteJump: false }}
+          physicsConfig={{ gravity: 9.81, allowInfiniteJump: true }}
           camera={{ near: 0.05, far: 160, fov: 55 }}
         >
           <World />
@@ -44,7 +44,7 @@ function App() {
         <>
           <header>
             <span>XRIFT WORLD</span>
-            <h1>KALEID DOME</h1>
+            <h1>KALEIDOME</h1>
             <p>万華鏡ドーム</p>
           </header>
           <button onClick={() => setWalk(!walk)}>{walk ? '全景へ戻る ↗' : '空間を歩く →'}</button>

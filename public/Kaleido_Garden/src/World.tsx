@@ -23,7 +23,7 @@ import {
 export type WorldProps = Record<string, never>
 
 /*
- * KALEID DOME — 万華鏡ドーム
+ * KALEIDOME — 万華鏡ドーム
  *
  * - 床: 暗い水面のような床。プレイヤーは一定間隔で、その時点の立ち位置を中心に
  *   「揺らぎをもった細い線の波紋」を放つ（中心は発生位置に固定）。
