@@ -9,7 +9,9 @@ import { World } from './World'
 import './style.css'
 
 function App() {
-  const [walk, setWalk] = useState(false)
+  const params = new URLSearchParams(location.search)
+  const capture = params.has('capture')
+  const [walk, setWalk] = useState(params.has('walk'))
   return (
     <XRiftProvider baseUrl="/">
       {walk ? (
@@ -35,16 +37,20 @@ function App() {
           <OrbitControls target={[0, 1.2, 0]} minDistance={4} maxDistance={40} maxPolarAngle={Math.PI / 2 - 0.025} />
         </Canvas>
       )}
-      <header>
-        <span>XRIFT WORLD</span>
-        <h1>枯山水万華鏡</h1>
-        <p>KALEIDO GARDEN</p>
-      </header>
-      <button onClick={() => setWalk(!walk)}>{walk ? '全景へ戻る ↗' : '空間を歩く →'}</button>
-      <footer>
-        <span>{walk ? 'WASD / マウス · Escで解除' : 'ドラッグで視点を回転 · スクロールでズーム'}</span>
-        <span>PETALS 3500 · GPU INSTANCING · SEASONS 120 SEC</span>
-      </footer>
+      {!capture && (
+        <>
+          <header>
+            <span>XRIFT WORLD</span>
+            <h1>枯山水万華鏡</h1>
+            <p>KALEIDO GARDEN</p>
+          </header>
+          <button onClick={() => setWalk(!walk)}>{walk ? '全景へ戻る ↗' : '空間を歩く →'}</button>
+          <footer>
+            <span>{walk ? 'WASD / マウス · Escで解除' : 'ドラッグで視点を回転 · スクロールでズーム'}</span>
+            <span>PETALS 3500 · GPU INSTANCING · SEASONS 120 SEC</span>
+          </footer>
+        </>
+      )}
     </XRiftProvider>
   )
 }
