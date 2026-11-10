@@ -11,6 +11,9 @@ import './style.css'
 function App() {
   const params = new URLSearchParams(location.search)
   const capture = params.has('capture')
+  // 確認用: ?cam=x,y,z&look=x,y,z で全景プレビューの視点を指定できる
+  const cam = (params.get('cam') ?? '11,7.5,17').split(',').map(Number) as [number, number, number]
+  const look = (params.get('look') ?? '0,1.2,0').split(',').map(Number) as [number, number, number]
   const [walk, setWalk] = useState(params.has('walk'))
   return (
     <XRiftProvider baseUrl="/">
@@ -25,7 +28,7 @@ function App() {
         </DevEnvironment>
       ) : (
         <Canvas
-          camera={{ position: [11, 7.5, 17], fov: 42, near: 0.05, far: 160 }}
+          camera={{ position: cam, fov: params.has('cam') ? 70 : 42, near: 0.05, far: 160 }}
           gl={{ antialias: true, toneMapping: ACESFilmicToneMapping, preserveDrawingBuffer: true }}
           dpr={[1, 1.5]}
         >
@@ -34,7 +37,7 @@ function App() {
               <World />
             </Physics>
           </Suspense>
-          <OrbitControls target={[0, 1.2, 0]} minDistance={4} maxDistance={40} maxPolarAngle={Math.PI / 2 - 0.025} />
+          <OrbitControls target={look} minDistance={0.1} maxDistance={40} maxPolarAngle={params.has('cam') ? Math.PI : Math.PI / 2 - 0.025} />
         </Canvas>
       )}
       {!capture && (
@@ -47,7 +50,7 @@ function App() {
           <button onClick={() => setWalk(!walk)}>{walk ? '全景へ戻る ↗' : '空間を歩く →'}</button>
           <footer>
             <span>{walk ? 'WASD / マウス · Escで解除' : 'ドラッグで視点を回転 · スクロールでズーム'}</span>
-            <span>SHARDS 3500 · GPU INSTANCING · THEMES 120 SEC</span>
+            <span>PETAL SCHOOLS · AURA WISPS · THEMES 120 SEC</span>
           </footer>
         </>
       )}
