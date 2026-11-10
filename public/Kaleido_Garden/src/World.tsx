@@ -112,6 +112,34 @@ const GLSL_NOISE = /* glsl */ `
 `
 
 
+
+// アバターの立ち位置から10秒かけてじわっと広がる波紋。
+// 広がるほど万華鏡折りノイズと角度の揺らぎで輪郭が崩れ、複雑な波形になる。
+// 床とドームで共用（ドームでは頭上に写る分）。
+const GLSL_RIPPLE = /* glsl */ `
+  uniform vec3 uAvatars[8]; // xy: アバターのXZ, z: 強さ
+  vec3 rippleGlow(vec2 p){
+    vec3 acc = vec3(0.0);
+    for(int i = 0; i < 8; i++){
+      vec3 av = uAvatars[i];
+      if(av.z < 0.02) continue;
+      float age = mod(uTime + float(i) * 0.37, 10.0);
+      vec2 rel = p - av.xy;
+      float d = length(rel);
+      vec2 wkp = kaleido(rel, uSegments);
+      vec2 wob = vec2(cos(uTime * 0.0628), sin(uTime * 0.0524)) * 0.35;
+      float warp = fbm3(wkp * 0.35 + wob) - 0.5;
+      float rr = d + warp * 2.6 * smoothstep(0.0, 2.5, age);
+      rr += sin(atan(rel.y, rel.x) * 3.0 + uTime * 0.3142 + float(i) * 1.7) * 0.3 * smoothstep(0.0, 3.0, age);
+      float ring = exp(-pow((rr - age * 2.4) * 1.4, 2.0));
+      float seg = 0.75 + 0.25 * sin(atan(rel.y, rel.x) * uSegments * 2.0);
+      float fade = smoothstep(0.0, 1.2, age) * pow(1.0 - age / 10.0, 1.6);
+      acc += (uGlowA * 0.8 + uGlowB * 0.45) * ring * seg * fade * av.z;
+    }
+    return acc;
+  }
+`
+
 const FLOOR_VERT = /* glsl */ `
   varying vec3 vWorld;
   void main(){
@@ -128,9 +156,9 @@ const FLOOR_FRAG = /* glsl */ `
   uniform vec3 uGlowA;
   uniform vec3 uGlowB;
   uniform vec3 uPetalA;
-  uniform vec3 uAvatars[8]; // xy: アバターのXZ, z: 強さ
   varying vec3 vWorld;
   ${GLSL_NOISE}
+  ${GLSL_RIPPLE}
   void main(){
     vec2 p = vWorld.xz;
     float r = length(p);
@@ -159,22 +187,7 @@ const FLOOR_FRAG = /* glsl */ `
     col += uGlowB * (gridR + gridA) * 0.10 * mask;
     col += uGlowA * contour * (0.6 + 0.9 * smoothstep(0.2, 0.9, v)) * mask;
     col *= 1.0 + 0.05 * sin(r * 40.0 - uTime * 2.1991);
-    // アバターの立ち位置から2.5秒ごとに広がる波紋。
-    // 広がるにつれ万華鏡折りのノイズで輪郭が崩れ、複雑な波形になる。
-    for(int i = 0; i < 8; i++){
-      vec3 av = uAvatars[i];
-      if(av.z < 0.02) continue;
-      float age = mod(uTime + float(i) * 0.37, 2.5);
-      vec2 rel = p - av.xy;
-      float d = length(rel);
-      vec2 wkp = kaleido(rel, uSegments);
-      float warp = fbm3(wkp * 0.35) - 0.5;
-      float rr = d + warp * 1.7 * smoothstep(0.0, 0.8, age);
-      float ring = exp(-pow((rr - age * 3.2) * 2.6, 2.0));
-      float seg = 0.75 + 0.25 * sin(atan(rel.y, rel.x) * uSegments * 2.0);
-      float fade = pow(1.0 - age / 2.5, 2.0);
-      col += (uGlowA * 0.8 + uGlowB * 0.45) * ring * seg * fade * av.z * mask;
-    }
+    col += rippleGlow(p) * mask;
     col += uPetalA * bloom * 0.35 * mask;
     col *= 0.75 + 0.25 * smoothstep(27.0, 6.0, r);
     col *= 1.5;
@@ -190,6 +203,7 @@ const DOME_FRAG = /* glsl */ `
   uniform vec3 uGlowB;
   varying vec3 vWorld;
   ${GLSL_NOISE}
+  ${GLSL_RIPPLE}
   void main(){
     vec3 dir = normalize(vWorld);
     float a = atan(dir.x, dir.z);
@@ -208,6 +222,8 @@ const DOME_FRAG = /* glsl */ `
     float sparkle = pow(max(0.0, fbm(dir.xy * 30.0 + dir.zx * 17.0)), 18.0);
     col += vec3(0.9, 0.95, 1.0) * sparkle * 0.6 * smoothstep(0.05, 0.5, dir.y);
     col *= smoothstep(-0.35, 0.02, dir.y) * 0.85 + 0.15;
+    // 波紋が万華鏡に写って頭上にも現れる（球面で歪んで複雑なパタンになる）
+    col += rippleGlow(dir.xz * 24.0) * 0.9 * smoothstep(-0.05, 0.25, dir.y);
     gl_FragColor = vec4(col, 1.0);
   }
 `
@@ -360,6 +376,7 @@ export function World() {
           uBase: shared.uBase,
           uGlowA: shared.uGlowA,
           uGlowB: shared.uGlowB,
+                  uAvatars: shared.uAvatars,
         },
         side: BackSide,
         depthWrite: false,
@@ -380,7 +397,7 @@ export function World() {
   const rimMat = useMemo(() => new MeshBasicMaterial({ color: PALETTES[0].glowA }), [])
 
   const petalMesh = useMemo(() => {
-    const plane = new PlaneGeometry(0.065, 0.105)
+    const plane = new PlaneGeometry(0.0325, 0.0525)
     const geo = new InstancedBufferGeometry()
     geo.index = plane.index
     geo.setAttribute('position', plane.attributes.position)
