@@ -222,8 +222,13 @@ const DOME_FRAG = /* glsl */ `
     float sparkle = pow(max(0.0, fbm(dir.xy * 30.0 + dir.zx * 17.0)), 18.0);
     col += vec3(0.9, 0.95, 1.0) * sparkle * 0.6 * smoothstep(0.05, 0.5, dir.y);
     col *= smoothstep(-0.35, 0.02, dir.y) * 0.85 + 0.15;
-    // 波紋が万華鏡に写って頭上にも現れる（球面で歪んで複雑なパタンになる）
-    col += rippleGlow(dir.xz * 24.0) * 0.9 * smoothstep(-0.05, 0.25, dir.y);
+    // プレイヤーから広がる波紋を、方位を万華鏡折りして天井に映す。
+    // 全セクターに鏡映しされた波紋が頭上で同期して広がり、複雑なパタンになる。
+    float rSector = 6.2831853 / uSegments;
+    float raz = atan(dir.x, dir.z);
+    float rfa = abs(mod(raz, rSector) - rSector * 0.5);
+    vec2 rdp = vec2(sin(rfa), cos(rfa)) * length(dir.xz) * 24.0;
+    col += rippleGlow(rdp) * 0.9 * smoothstep(-0.05, 0.25, dir.y);
     gl_FragColor = vec4(col, 1.0);
   }
 `
