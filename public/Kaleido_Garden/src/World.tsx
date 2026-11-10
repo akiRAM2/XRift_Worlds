@@ -430,7 +430,7 @@ export function World() {
     avatars: Array.from({ length: 8 }, () => ({ x: 0, z: 0, s: 0 })),
   })
 
-  useFrame((state) => {
+  useFrame(() => {
     const t = now() / 1000
     shared.uTime.value = t % TIME_WRAP
     shared.uSegments.value = 9 + Math.sin(t * 0.017) * 2.5
@@ -456,7 +456,7 @@ export function World() {
     mixInto(shared.uPetalA.value, cur.petalA, nxt.petalA)
     mixInto(shared.uPetalB.value, cur.petalB, nxt.petalB)
 
-    // アバター位置の収集。slot0は自分（カメラ≒アバター位置）、slot1以降はリモート
+    // アバター位置の収集。slot0は自分（getLocalMovement）、slot1以降はリモート
     // （useUsersのgetMovement、毎フレーム呼んでも再描画しない）。庭の外では強さがフェード。
     const sc = scratch.current
     const avatars = sc.avatars
@@ -467,7 +467,9 @@ export function World() {
       av.x = x
       av.z = z
     }
-    setAvatar(0, state.camera.position.x, state.camera.position.z)
+    // 自分はカメラではなくアバター本体の位置（getLocalMovement = PlayerMovement.position）
+    const localMovement = users.getLocalMovement()
+    setAvatar(0, localMovement.position.x, localMovement.position.z)
     for (let i = 0; i < 7; i++) {
       const remote = users.remoteUsers[i]
       const movement = remote ? users.getMovement(remote.id) : undefined
