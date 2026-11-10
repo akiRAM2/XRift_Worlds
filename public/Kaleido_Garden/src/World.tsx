@@ -6,39 +6,42 @@ import {
   BackSide,
   Color,
   DoubleSide,
-  IcosahedronGeometry,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   Mesh,
   MeshBasicMaterial,
-  MeshStandardMaterial,
   AdditiveBlending,
   PlaneGeometry,
   ShaderMaterial,
-  Vector3,
+  Vector4,
 } from 'three'
 
 export type WorldProps = Record<string, never>
 
 /*
- * 枯山水万華鏡 — Karesansui Kaleidoscope
+ * KALEID DOME — 万華鏡ドーム
  *
- * 構成はスマホでも軽いことを優先している:
- * - 庭の床: シェーダー1枚。万華鏡対称に折ったFBMの等高線が花のように開いて消える。
- *   石と訪問者の足元からは波紋が広がる。
- * - 空のドーム: シェーダー1枚。床と同じ模様関数とパレットを共有し、空にも模様が映る。
- * - 花びらの渦: GPUインスタンシング1ドローコール。全個体の軌道計算は頂点シェーダー内で
- *   完結し、CPUは時刻uniformを渡すだけ。
- * - 石と縁石: 固定コライダー付きの低ポリゴン。
- * ポストプロセス、テクスチャ、影は使わない。時刻は useServerClock 由来で全員同期する。
+ * 設計:
+ * - 床: シェーダー1枚。万華鏡対称に折ったFBMの等高線模様が変容し続ける。
+ * - 波紋: プレイヤーは10秒ごとに、その時点の立ち位置を中心とする波紋を1つ放つ。
+ *   中心は発生位置に固定されるスナップショットで、歩いても付いてこない。
+ *   発火管理はJS側（サーバ時計で全員ほぼ同期）、描画はシェーダー側。
+ * - 天井ドーム: 床の表示（模様＋波紋）を、方位を万華鏡折りして映す。
+ *   つまり天井は「床を万華鏡で見た像」。ドーム自体の淡い模様も下地として残す。
+ * - 光の破片: GPUインスタンシング1ドローコール。流れ場で不規則に漂い、
+ *   進行方向フレームの中で破片ごとにランダムなローカル軸回転をする。
+ * ポストプロセス、テクスチャ、影は使わない。時刻は useServerClock 由来。
  */
 
 const PETAL_COUNT = 3500
-const GARDEN_RADIUS = 26
+const DISC_RADIUS = 26
 const THEME_SECONDS = 120
 // シェーダーへ渡す時刻はこの周期で折り返す（float精度対策。VAT_TestのMEADOWと同じ方針）
 const TIME_WRAP = 600
 const THEME_FADE = 24
+// 波紋: 寿命と発火間隔（秒）。同時に存在する波紋の最大数。
+const RIPPLE_LIFE = 10
+const RIPPLE_SLOTS = 16
 
 interface Palette {
   base: string
@@ -59,14 +62,6 @@ const PALETTES: Palette[] = [
   // AMBER ALERT
   { base: '#0d0503', glowA: '#ffb020', glowB: '#ff3b30', petalA: '#fff3d6', petalB: '#ff8a3c' },
 ]
-
-const ROCKS = [
-  { pos: [3.4, -1.6], r: 0.85, h: 1.05, rot: 0.7 },
-  { pos: [-4.6, 2.2], r: 1.25, h: 1.55, rot: 2.1 },
-  { pos: [1.6, 5.6], r: 0.6, h: 0.75, rot: 4.0 },
-  { pos: [-2.2, -5.2], r: 0.95, h: 1.25, rot: 1.2 },
-  { pos: [6.6, 3.6], r: 0.55, h: 0.65, rot: 5.3 },
-] as const
 
 const GLSL_NOISE = /* glsl */ `
   float hash21(vec2 p){
@@ -111,20 +106,19 @@ const GLSL_NOISE = /* glsl */ `
   }
 `
 
-
-
-// アバターの立ち位置から10秒かけてじわっと広がる波紋。
+// 波紋。中心は発生した瞬間の立ち位置（スナップショット）で、時間だけが進む。
 // 広がるほど万華鏡折りノイズと角度の揺らぎで輪郭が崩れ、複雑な波形になる。
-// 床とドームで共用（ドームでは頭上に写る分）。
 const GLSL_RIPPLE = /* glsl */ `
-  uniform vec3 uAvatars[8]; // xy: アバターのXZ, z: 強さ
+  uniform vec4 uRipples[16]; // xy: 中心XZ, z: 発生時刻(折り返し済み), w: 強さ
+  uniform float uTime;
   vec3 rippleGlow(vec2 p){
     vec3 acc = vec3(0.0);
-    for(int i = 0; i < 8; i++){
-      vec3 av = uAvatars[i];
-      if(av.z < 0.02) continue;
-      float age = mod(uTime + float(i) * 0.37, 10.0);
-      vec2 rel = p - av.xy;
+    for(int i = 0; i < 16; i++){
+      vec4 rp = uRipples[i];
+      if(rp.w < 0.02) continue;
+      float age = mod(uTime - rp.z + 600.0, 600.0);
+      if(age > 10.0) continue;
+      vec2 rel = p - rp.xy;
       float d = length(rel);
       vec2 wkp = kaleido(rel, uSegments);
       vec2 wob = vec2(cos(uTime * 0.0628), sin(uTime * 0.0524)) * 0.35;
@@ -134,9 +128,28 @@ const GLSL_RIPPLE = /* glsl */ `
       float ring = exp(-pow((rr - age * 2.4) * 1.4, 2.0));
       float seg = 0.75 + 0.25 * sin(atan(rel.y, rel.x) * uSegments * 2.0);
       float fade = smoothstep(0.0, 1.2, age) * pow(1.0 - age / 10.0, 1.6);
-      acc += (uGlowA * 0.8 + uGlowB * 0.45) * ring * seg * fade * av.z;
+      acc += (uGlowA * 0.8 + uGlowB * 0.45) * ring * seg * fade * rp.w;
     }
     return acc;
+  }
+`
+
+// 床の表示そのもの（模様＋格子＋波紋）。床では実座標で、天井では万華鏡折りした座標で引く。
+const GLSL_PATTERN = /* glsl */ `
+  vec3 gardenPattern(vec2 p){
+    vec2 kp = kaleido(p, uSegments);
+    vec2 flow = 1.2 * vec2(cos(uTime * 0.0524), sin(uTime * 0.0419));
+    float v = fbm(kp * 0.32 + flow + fbm3(kp * 0.12 - flow) * 0.9);
+    float contour = 1.0 - smoothstep(0.0, 0.07, abs(fract(v * 2.6 + uTime * 0.015) - 0.5));
+    contour = pow(contour, 3.0);
+    float r = length(p);
+    float gridR = pow(1.0 - smoothstep(0.0, 0.05, abs(fract(r * 0.8) - 0.5)), 2.0);
+    float spoke = atan(p.y, p.x) / 6.2831853 * uSegments * 6.0;
+    float gridA = pow(1.0 - smoothstep(0.0, 0.05, abs(fract(spoke) - 0.5)), 2.0);
+    vec3 col = uGlowA * contour * (0.6 + 0.9 * smoothstep(0.2, 0.9, v));
+    col += uGlowB * (gridR + gridA) * 0.10;
+    col += rippleGlow(p);
+    return col;
   }
 `
 
@@ -150,7 +163,6 @@ const FLOOR_VERT = /* glsl */ `
 `
 
 const FLOOR_FRAG = /* glsl */ `
-  uniform float uTime;
   uniform float uSegments;
   uniform vec3 uBase;
   uniform vec3 uGlowA;
@@ -159,35 +171,19 @@ const FLOOR_FRAG = /* glsl */ `
   varying vec3 vWorld;
   ${GLSL_NOISE}
   ${GLSL_RIPPLE}
+  ${GLSL_PATTERN}
   void main(){
     vec2 p = vWorld.xz;
     float r = length(p);
     float mask = smoothstep(27.1, 26.0, r);
 
-    // 万華鏡対称に折った流れ模様。波高が模様を歪ませ、干渉縞を作る。
-    vec2 kp = kaleido(p, uSegments);
-    vec2 flow = 1.2 * vec2(cos(uTime * 0.0524), sin(uTime * 0.0419));
-    float v = fbm(kp * 0.32 + flow + fbm3(kp * 0.12 - flow) * 0.9);
-    float contour = 1.0 - smoothstep(0.0, 0.07, abs(fract(v * 2.6 + uTime * 0.015) - 0.5));
-    contour = pow(contour, 3.0);
-
-    // ホログラム格子（同心円と放射）とスキャンラインのきらめき
-    float gridR = pow(1.0 - smoothstep(0.0, 0.05, abs(fract(r * 0.8) - 0.5)), 2.0);
-    float spoke = atan(p.y, p.x) / 6.2831853 * uSegments * 6.0;
-    float gridA = pow(1.0 - smoothstep(0.0, 0.05, abs(fract(spoke) - 0.5)), 2.0);
-
-    // 熊手で引いた砂紋
-    float rake = sin(r * 7.0 - fbm3(p * 0.22) * 5.0) * 0.5 + 0.5;
-
     // ゆっくり移動しながら花開いては消える光の中心
     vec2 bloomPos = 13.0 * vec2(cos(uTime * 0.0419), sin(uTime * 0.0314));
     float bloom = exp(-dot(p - bloomPos, p - bloomPos) / 10.0) * (0.5 + 0.5 * sin(uTime * 0.4503));
 
-    vec3 col = uBase * (0.9 + rake * 0.06);
-    col += uGlowB * (gridR + gridA) * 0.10 * mask;
-    col += uGlowA * contour * (0.6 + 0.9 * smoothstep(0.2, 0.9, v)) * mask;
+    vec3 col = uBase * 0.9;
+    col += gardenPattern(p) * mask;
     col *= 1.0 + 0.05 * sin(r * 40.0 - uTime * 2.1991);
-    col += rippleGlow(p) * mask;
     col += uPetalA * bloom * 0.35 * mask;
     col *= 0.75 + 0.25 * smoothstep(27.0, 6.0, r);
     col *= 1.5;
@@ -196,7 +192,6 @@ const FLOOR_FRAG = /* glsl */ `
 `
 
 const DOME_FRAG = /* glsl */ `
-  uniform float uTime;
   uniform float uSegments;
   uniform vec3 uBase;
   uniform vec3 uGlowA;
@@ -204,6 +199,7 @@ const DOME_FRAG = /* glsl */ `
   varying vec3 vWorld;
   ${GLSL_NOISE}
   ${GLSL_RIPPLE}
+  ${GLSL_PATTERN}
   void main(){
     vec3 dir = normalize(vWorld);
     float a = atan(dir.x, dir.z);
@@ -217,18 +213,15 @@ const DOME_FRAG = /* glsl */ `
     float lon = pow(1.0 - smoothstep(0.0, 0.03, abs(fract(a / sector * 6.0) - 0.5)), 2.0);
     vec3 col = uBase * 0.85;
     col += uGlowB * (lat + lon) * 0.07 * smoothstep(-0.1, 0.3, dir.y);
-    col += uGlowA * contour * 1.15 * smoothstep(-0.15, 0.45, dir.y);
+    col += uGlowA * contour * 0.55 * smoothstep(-0.15, 0.45, dir.y);
     col += uGlowB * pow(max(dir.y, 0.0), 3.0) * 0.12;
     float sparkle = pow(max(0.0, fbm(dir.xy * 30.0 + dir.zx * 17.0)), 18.0);
     col += vec3(0.9, 0.95, 1.0) * sparkle * 0.6 * smoothstep(0.05, 0.5, dir.y);
     col *= smoothstep(-0.35, 0.02, dir.y) * 0.85 + 0.15;
-    // プレイヤーから広がる波紋を、方位を万華鏡折りして天井に映す。
-    // 全セクターに鏡映しされた波紋が頭上で同期して広がり、複雑なパタンになる。
-    float rSector = 6.2831853 / uSegments;
-    float raz = atan(dir.x, dir.z);
-    float rfa = abs(mod(raz, rSector) - rSector * 0.5);
-    vec2 rdp = vec2(sin(rfa), cos(rfa)) * length(dir.xz) * 24.0;
-    col += rippleGlow(rdp) * 0.9 * smoothstep(-0.05, 0.25, dir.y);
+    // 床の表示を万華鏡として映す: 方位をセクター折りし、半径は床の半径へ対応づける。
+    // 床で広がる波紋も模様も、鏡映しになって頭上に現れる。
+    vec2 mp = vec2(sin(a), cos(a)) * length(dir.xz) * 26.0;
+    col += gardenPattern(mp) * 0.85 * smoothstep(-0.05, 0.25, dir.y);
     gl_FragColor = vec4(col, 1.0);
   }
 `
@@ -317,23 +310,6 @@ const PETAL_FRAG = /* glsl */ `
   }
 `
 
-// 位置ハッシュで頂点をずらす。重複頂点も同じ変位になるため面が裂けない。
-function jitteredRock(radius: number, seed: number) {
-  const geo = new IcosahedronGeometry(radius, 1)
-  const pos = geo.attributes.position
-  const v = new Vector3()
-  for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i)
-    const h =
-      Math.sin(v.x * 127.1 + v.y * 311.7 + v.z * 74.7 + seed * 19.19) * 43758.5453
-    const jitter = (h - Math.floor(h) - 0.5) * 0.30 * radius
-    v.addScaledVector(v.clone().normalize(), jitter)
-    pos.setXYZ(i, v.x, v.y, v.z)
-  }
-  geo.computeVertexNormals()
-  return geo
-}
-
 export function World() {
   const { now } = useServerClock()
   const users = useUsers()
@@ -347,7 +323,10 @@ export function World() {
       uGlowB: { value: new Color(PALETTES[0].glowB) },
       uPetalA: { value: new Color(PALETTES[0].petalA) },
       uPetalB: { value: new Color(PALETTES[0].petalB) },
-      uAvatars: { value: Array.from({ length: 8 }, () => new Vector3(0, 0, 0)) },
+      // 波紋スロット（xy: 中心, z: 発生時刻, w: 強さ）。JSが発火時に書き込む。
+      uRipples: {
+        value: Array.from({ length: RIPPLE_SLOTS }, () => new Vector4(0, 0, -100, 0)),
+      },
     }),
     [],
   )
@@ -364,7 +343,7 @@ export function World() {
           uGlowA: shared.uGlowA,
           uGlowB: shared.uGlowB,
           uPetalA: shared.uPetalA,
-          uAvatars: shared.uAvatars,
+          uRipples: shared.uRipples,
         },
       }),
     [shared],
@@ -381,7 +360,7 @@ export function World() {
           uBase: shared.uBase,
           uGlowA: shared.uGlowA,
           uGlowB: shared.uGlowB,
-                  uAvatars: shared.uAvatars,
+          uRipples: shared.uRipples,
         },
         side: BackSide,
         depthWrite: false,
@@ -389,16 +368,6 @@ export function World() {
     [shared],
   )
 
-  const rockMat = useMemo(
-    () =>
-      new MeshStandardMaterial({
-        color: '#151824',
-        roughness: 0.9,
-        flatShading: true,
-        emissive: '#000000',
-      }),
-    [],
-  )
   const rimMat = useMemo(() => new MeshBasicMaterial({ color: PALETTES[0].glowA }), [])
 
   const petalMesh = useMemo(() => {
@@ -445,11 +414,12 @@ export function World() {
     return mesh
   }, [shared])
 
-  const rockGeos = useMemo(() => ROCKS.map((rock, i) => jitteredRock(rock.r, i + 1)), [])
   const scratch = useRef({
     a: new Color(),
     b: new Color(),
     avatars: Array.from({ length: 8 }, () => ({ x: 0, z: 0, s: 0 })),
+    nextEmit: Array.from({ length: 8 }, () => -1),
+    rippleIdx: 0,
   })
 
   useFrame(() => {
@@ -479,11 +449,11 @@ export function World() {
     mixInto(shared.uPetalB.value, cur.petalB, nxt.petalB)
 
     // アバター位置の収集。slot0は自分（getLocalMovement）、slot1以降はリモート
-    // （useUsersのgetMovement、毎フレーム呼んでも再描画しない）。庭の外では強さがフェード。
+    // （useUsersのgetMovement、毎フレーム呼んでも再描画しない）。ドーム内の間だけ有効。
     const sc = scratch.current
     const avatars = sc.avatars
     const setAvatar = (i: number, x: number, z: number) => {
-      const inside = Math.hypot(x, z) < GARDEN_RADIUS ? 1 : 0
+      const inside = Math.hypot(x, z) < DISC_RADIUS ? 1 : 0
       const av = avatars[i]
       av.s += (inside - av.s) * 0.06
       av.x = x
@@ -502,14 +472,24 @@ export function World() {
       }
     }
 
-    // 波紋の発生源として共有uniformへ書き込む
-    const slots = shared.uAvatars.value
-    avatars.forEach((av, i) => slots[i].set(av.x, av.z, av.s))
+    // 波紋の発火管理。各アバターは10秒ごとに1回、その時点の立ち位置を
+    // スナップショットした波紋を放つ。中心は固定で、歩いても付いてこない。
+    const ripples = shared.uRipples.value
+    avatars.forEach((av, i) => {
+      if (sc.nextEmit[i] < 0) sc.nextEmit[i] = t + 0.6 + i * 1.3
+      if (t < sc.nextEmit[i]) return
+      if (av.s > 0.5) {
+        ripples[sc.rippleIdx].set(av.x, av.z, t % TIME_WRAP, 1)
+        sc.rippleIdx = (sc.rippleIdx + 1) % RIPPLE_SLOTS
+        sc.nextEmit[i] = t + RIPPLE_LIFE
+      } else {
+        sc.nextEmit[i] = t + 1 // ドームの外にいる間は発火を先送り
+      }
+    })
 
-    // 縁のネオンリングと石の縁発光をテーマ色に同期
+    // 境界リングをテーマ色に同期
     const pulse = 0.5 + 0.5 * Math.sin(t * 0.4503)
     rimMat.color.copy(shared.uGlowA.value).multiplyScalar(0.8 + 0.35 * pulse)
-    rockMat.emissive.copy(shared.uGlowB.value).multiplyScalar(0.06 + 0.05 * pulse)
   })
 
   return (
@@ -517,52 +497,33 @@ export function World() {
       <ambientLight intensity={0.55} />
       <directionalLight position={[6, 10, 4]} intensity={1.1} />
 
-      {/* 空のドーム（内側から見る） */}
+      {/* 天井ドーム（内側から見る） */}
       <mesh material={domeMat} renderOrder={-1}>
         <sphereGeometry args={[70, 48, 32]} />
       </mesh>
 
-      {/* 庭の床（万華鏡シェーダー） */}
+      {/* 床（万華鏡シェーダー） */}
       <mesh material={floorMat} rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[GARDEN_RADIUS + 1.5, 72]} />
+        <circleGeometry args={[DISC_RADIUS + 1.5, 72]} />
       </mesh>
 
-      {/* 庭の外側の地面 */}
+      {/* ドームの外側の地面 */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.03, 0]}>
         <circleGeometry args={[80, 48]} />
         <meshStandardMaterial color="#06060a" roughness={1} />
       </mesh>
 
-      {/* 縁石 */}
+      {/* 境界リング */}
       <mesh material={rimMat} rotation={[Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
-        <torusGeometry args={[GARDEN_RADIUS + 0.4, 0.28, 10, 108]} />
+        <torusGeometry args={[DISC_RADIUS + 0.4, 0.28, 10, 108]} />
       </mesh>
 
-      {/* 石 */}
-      {ROCKS.map((rock, i) => (
-        <mesh
-          key={i}
-          material={rockMat}
-          geometry={rockGeos[i]}
-          position={[rock.pos[0], rock.h * 0.30, rock.pos[1]]}
-          rotation={[0, rock.rot, 0]}
-          scale={[1, rock.h / rock.r, 1]}
-        />
-      ))}
-
-      {/* 花びらの渦（GPUインスタンシング） */}
+      {/* 光の破片の渦（GPUインスタンシング） */}
       <primitive object={petalMesh} />
 
-      {/* 物理: 床と石 */}
+      {/* 物理: 床 */}
       <RigidBody type="fixed" colliders={false}>
         <CuboidCollider args={[40, 0.15, 40]} position={[0, -0.15, 0]} />
-        {ROCKS.map((rock, i) => (
-          <CuboidCollider
-            key={i}
-            args={[rock.r * 0.8, rock.h * 0.5, rock.r * 0.8]}
-            position={[rock.pos[0], rock.h * 0.4, rock.pos[1]]}
-          />
-        ))}
       </RigidBody>
 
       <SpawnPoint position={[0, 0, 15]} />

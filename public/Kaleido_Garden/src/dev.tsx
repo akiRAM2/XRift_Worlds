@@ -41,13 +41,13 @@ function App() {
         <>
           <header>
             <span>XRIFT WORLD</span>
-            <h1>枯山水万華鏡</h1>
-            <p>KALEIDO GARDEN</p>
+            <h1>KALEID DOME</h1>
+            <p>万華鏡ドーム</p>
           </header>
           <button onClick={() => setWalk(!walk)}>{walk ? '全景へ戻る ↗' : '空間を歩く →'}</button>
           <footer>
             <span>{walk ? 'WASD / マウス · Escで解除' : 'ドラッグで視点を回転 · スクロールでズーム'}</span>
-            <span>PETALS 3500 · GPU INSTANCING · SEASONS 120 SEC</span>
+            <span>SHARDS 3500 · GPU INSTANCING · THEMES 120 SEC</span>
           </footer>
         </>
       )}
