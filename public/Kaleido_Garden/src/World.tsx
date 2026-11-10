@@ -10,7 +10,9 @@ import {
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   Mesh,
-  NormalBlending,
+  MeshBasicMaterial,
+  MeshStandardMaterial,
+  AdditiveBlending,
   PlaneGeometry,
   ShaderMaterial,
   Vector3,
@@ -33,10 +35,10 @@ export type WorldProps = Record<string, never>
 
 const PETAL_COUNT = 3500
 const GARDEN_RADIUS = 26
-const SEASON_SECONDS = 120
+const THEME_SECONDS = 120
 // シェーダーへ渡す時刻はこの周期で折り返す（float精度対策。VAT_TestのMEADOWと同じ方針）
 const TIME_WRAP = 600
-const SEASON_FADE = 24
+const THEME_FADE = 24
 
 interface Palette {
   base: string
@@ -46,12 +48,16 @@ interface Palette {
   petalB: string
 }
 
-// 春・夏・秋・冬。2分ごとに次の季節へ24秒かけて移る。
+// サイバーなカラーテーマ4種。2分ごとに次のテーマへ24秒かけて移る。
 const PALETTES: Palette[] = [
-  { base: '#171021', glowA: '#ff9ecb', glowB: '#ffd98a', petalA: '#ffe3ef', petalB: '#ff9ec4' },
-  { base: '#0a1620', glowA: '#4fe3d2', glowB: '#9be7ff', petalA: '#eafffb', petalB: '#8fe8ff' },
-  { base: '#170f08', glowA: '#ff9a3c', glowB: '#ff5d47', petalA: '#ffd9a0', petalB: '#ff7a4d' },
-  { base: '#0a0d14', glowA: '#aecbf5', glowB: '#e8f1ff', petalA: '#ffffff', petalB: '#cfe0ff' },
+  // NEON CYAN × MAGENTA
+  { base: '#04060e', glowA: '#00e5ff', glowB: '#ff2ea6', petalA: '#d9fbff', petalB: '#00c8ff' },
+  // VIOLET PULSE
+  { base: '#07040f', glowA: '#a855f7', glowB: '#ff4d8d', petalA: '#f3e8ff', petalB: '#c084fc' },
+  // ACID MINT
+  { base: '#030a08', glowA: '#34ffb0', glowB: '#00b3ff', petalA: '#e2fff4', petalB: '#4dffc3' },
+  // AMBER ALERT
+  { base: '#0d0503', glowA: '#ffb020', glowB: '#ff3b30', petalA: '#fff3d6', petalB: '#ff8a3c' },
 ]
 
 const ROCKS = [
@@ -138,8 +144,12 @@ const FLOOR_FRAG = /* glsl */ `
     vec2 kp = kaleido(p, uSegments);
     vec2 flow = 1.2 * vec2(cos(uTime * 0.0524), sin(uTime * 0.0419));
     float v = fbm(kp * 0.32 + flow + fbm3(kp * 0.12 - flow) * 0.9);
-    float contour = 1.0 - smoothstep(0.0, 0.16, abs(fract(v * 2.6 + uTime * 0.015) - 0.5));
-    contour = pow(contour, 2.0);
+    float contour = 1.0 - smoothstep(0.0, 0.07, abs(fract(v * 2.6 + uTime * 0.015) - 0.5));
+    contour = pow(contour, 3.0);
+    // ホログラム格子（同心円と放射）とスキャンラインのきらめき
+    float gridR = pow(1.0 - smoothstep(0.0, 0.05, abs(fract(r * 0.8) - 0.5)), 2.0);
+    float spoke = atan(p.y, p.x) / 6.2831853 * uSegments * 6.0;
+    float gridA = pow(1.0 - smoothstep(0.0, 0.05, abs(fract(spoke) - 0.5)), 2.0);
 
     // 熊手で引いた砂紋
     float rake = sin(r * 7.0 - fbm3(p * 0.22) * 5.0) * 0.5 + 0.5;
@@ -159,8 +169,10 @@ const FLOOR_FRAG = /* glsl */ `
     vec2 bloomPos = 13.0 * vec2(cos(uTime * 0.0419), sin(uTime * 0.0314));
     float bloom = exp(-dot(p - bloomPos, p - bloomPos) / 10.0) * (0.5 + 0.5 * sin(uTime * 0.4503));
 
-    vec3 col = uBase * (0.82 + rake * 0.10);
-    col += uGlowA * contour * (0.35 + 0.65 * smoothstep(0.2, 0.9, v)) * mask;
+    vec3 col = uBase * (0.9 + rake * 0.06);
+    col += uGlowB * (gridR + gridA) * 0.10 * mask;
+    col += uGlowA * contour * (0.6 + 0.9 * smoothstep(0.2, 0.9, v)) * mask;
+    col *= 1.0 + 0.05 * sin(r * 40.0 - uTime * 2.1991);
     col += uGlowB * rip * 0.75 * mask;
     col += uPetalA * bloom * 0.35 * mask;
     col *= 0.75 + 0.25 * smoothstep(27.0, 6.0, r);
@@ -186,7 +198,10 @@ const DOME_FRAG = /* glsl */ `
     vec2 sp = vec2(a * 4.0, dir.y * 2.2);
     float v = fbm(sp * 1.4 + 0.6 * vec2(cos(uTime * 0.0314), sin(uTime * 0.0524)) + fbm3(sp * 0.8) * 0.7);
     float contour = pow(1.0 - smoothstep(0.0, 0.18, abs(fract(v * 2.2) - 0.5)), 2.0);
+    float lat = pow(1.0 - smoothstep(0.0, 0.03, abs(fract(dir.y * 6.0) - 0.5)), 2.0);
+    float lon = pow(1.0 - smoothstep(0.0, 0.03, abs(fract(a / sector * 6.0) - 0.5)), 2.0);
     vec3 col = uBase * 0.85;
+    col += uGlowB * (lat + lon) * 0.07 * smoothstep(-0.1, 0.3, dir.y);
     col += uGlowA * contour * 1.15 * smoothstep(-0.15, 0.45, dir.y);
     col += uGlowB * pow(max(dir.y, 0.0), 3.0) * 0.12;
     float sparkle = pow(max(0.0, fbm(dir.xy * 30.0 + dir.zx * 17.0)), 18.0);
@@ -238,12 +253,11 @@ const PETAL_FRAG = /* glsl */ `
   varying vec2 vUv;
   varying float vShade;
   void main(){
-    vec2 q = vUv - vec2(0.5, 0.42);
-    q.x *= 1.3;
-    float d = length(q) + (vUv.y - 0.42) * 0.16;
-    float alpha = smoothstep(0.55, 0.10, d) * 0.95;
+    vec2 q = vUv - 0.5;
+    float d = abs(q.x) * 2.4 + abs(q.y) * 1.05;
+    float alpha = smoothstep(1.0, 0.5, d) * 0.95;
     if(alpha < 0.01) discard;
-    vec3 col = mix(uPetalB, uPetalA, vUv.y) * vShade;
+    vec3 col = mix(uPetalB, uPetalA, vUv.y) * vShade * 1.5;
     gl_FragColor = vec4(col, alpha);
   }
 `
@@ -318,6 +332,18 @@ export function World() {
     [shared],
   )
 
+  const rockMat = useMemo(
+    () =>
+      new MeshStandardMaterial({
+        color: '#151824',
+        roughness: 0.9,
+        flatShading: true,
+        emissive: '#000000',
+      }),
+    [],
+  )
+  const rimMat = useMemo(() => new MeshBasicMaterial({ color: PALETTES[0].glowA }), [])
+
   const petalMesh = useMemo(() => {
     const plane = new PlaneGeometry(0.13, 0.21)
     const geo = new InstancedBufferGeometry()
@@ -355,7 +381,7 @@ export function World() {
       transparent: true,
       depthWrite: false,
       side: DoubleSide,
-      blending: NormalBlending,
+      blending: AdditiveBlending,
     })
     const mesh = new Mesh(geo, mat)
     mesh.frustumCulled = false
@@ -370,12 +396,12 @@ export function World() {
     shared.uTime.value = t % TIME_WRAP
     shared.uSegments.value = 9 + Math.sin(t * 0.017) * 2.5
 
-    // 季節パレットの補間
-    const cycle = t % (SEASON_SECONDS * PALETTES.length)
-    const idx = Math.floor(cycle / SEASON_SECONDS)
-    const local = cycle - idx * SEASON_SECONDS
-    const fadeStart = SEASON_SECONDS - SEASON_FADE
-    const f = local > fadeStart ? (local - fadeStart) / SEASON_FADE : 0
+    // テーマパレットの補間
+    const cycle = t % (THEME_SECONDS * PALETTES.length)
+    const idx = Math.floor(cycle / THEME_SECONDS)
+    const local = cycle - idx * THEME_SECONDS
+    const fadeStart = THEME_SECONDS - THEME_FADE
+    const f = local > fadeStart ? (local - fadeStart) / THEME_FADE : 0
     const smooth = f * f * (3 - 2 * f)
     const cur = PALETTES[idx]
     const nxt = PALETTES[(idx + 1) % PALETTES.length]
@@ -397,6 +423,11 @@ export function World() {
     const target = dist < GARDEN_RADIUS ? 1 : 0
     scratch.current.visitor += (target - scratch.current.visitor) * 0.06
     shared.uVisitor.value.set(cam.x, cam.z, scratch.current.visitor)
+
+    // 縁のネオンリングと石の縁発光をテーマ色に同期
+    const pulse = 0.5 + 0.5 * Math.sin(t * 0.4503)
+    rimMat.color.copy(shared.uGlowA.value).multiplyScalar(0.8 + 0.35 * pulse)
+    rockMat.emissive.copy(shared.uGlowB.value).multiplyScalar(0.06 + 0.05 * pulse)
   })
 
   return (
@@ -421,22 +452,20 @@ export function World() {
       </mesh>
 
       {/* 縁石 */}
-      <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
+      <mesh material={rimMat} rotation={[Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
         <torusGeometry args={[GARDEN_RADIUS + 0.4, 0.28, 10, 108]} />
-        <meshStandardMaterial color="#1d1d24" roughness={0.95} />
       </mesh>
 
       {/* 石 */}
       {ROCKS.map((rock, i) => (
         <mesh
           key={i}
+          material={rockMat}
           geometry={rockGeos[i]}
           position={[rock.pos[0], rock.h * 0.30, rock.pos[1]]}
           rotation={[0, rock.rot, 0]}
           scale={[1, rock.h / rock.r, 1]}
-        >
-          <meshStandardMaterial color="#363b47" roughness={0.95} flatShading />
-        </mesh>
+        />
       ))}
 
       {/* 花びらの渦（GPUインスタンシング） */}
