@@ -37,5 +37,5 @@ npx @xrift/cli upload world   # 新規ワールドとして登録される。KAL
 ## 注意
 
 - `public/thumbnail.png` は KALEID DOME のものを仮コピーしている。アップロード前にこのワールドのキャプチャに差し替えること。
-- `node_modules` は `../Kaleido_Garden/node_modules` へのシンボリックリンク (依存バージョンが同じため)。`npm ci` を実行すると実体ができる。
+- KALEID DOME とは完全に分離した独立プロジェクト (依存も共有しない。独自の `node_modules` / `package-lock.json` を持つ)。
 - 未コミット・未アップロードのローカル作業。アップロードとコミットはユーザーの判断で行う。
